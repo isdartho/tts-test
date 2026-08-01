@@ -1,0 +1,19 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Audio outputs
+*.wav
+*.mp3
+*.aiff
+*.au
+
+# Models cache (downloaded automatically on first use)
+models/*.onnx
+models/*.bin
+.cache/
+
+# OS metadata
+.DS_Store
+.directory
