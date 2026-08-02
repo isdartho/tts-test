@@ -197,31 +197,37 @@ class KokoroBackend(BaseTTSBackend):
         return buf.getvalue(), sample_rate
 
     def _break_sentences(self, text: str) -> List[str]:
-        return [sentence.strip() for sentence in text.replace("\n", " ").split(".") if sentence]
+        sentences = re.split(r'(?<=[.!?])\s+', text.replace("\n", " "))
+        return [sentence.strip() for sentence in sentences if sentence.strip()]
 
-    def _process_text(self, text:str , queue: Queue, config: TTSConfig) -> None:
-        sentences = self._break_sentences(text)
-        for i, sentence in enumerate(sentences):
-            if not sentence:
-                continue
-            wav_bytes, _ = self.synthesize_wav_bytes(sentence, config)
-            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
-                tmp.write(wav_bytes)
-                tmp_path = tmp.name
-                queue.put(tmp_path)
+    def _process_text(self, text: str, queue: Queue, config: TTSConfig) -> None:
+        try:
+            sentences = self._break_sentences(text)
+            for sentence in sentences:
+                wav_bytes, _ = self.synthesize_wav_bytes(sentence, config)
+                with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+                    tmp.write(wav_bytes)
+                    tmp_path = tmp.name
+                    queue.put(tmp_path)
+        finally:
+            queue.put(None)
 
     def speak(self, text: str, config: TTSConfig) -> None:
+        if not text or not text.strip():
+            return
+
         speech_file_queue = Queue()
-        text_processing = threading.Thread(target=self._process_text, args=(text, speech_file_queue, config), daemon=True)
+        text_processing = threading.Thread(
+            target=self._process_text, 
+            args=(text, speech_file_queue, config), 
+            daemon=True
+        )
         text_processing.start()
 
-        while True: #wait until first speech block is ready
-            if not speech_file_queue.empty():
-                break;
-        while text_processing.is_alive() or not speech_file_queue.empty():  #run till text_processing is alive or speech_file_queue is not empty
+        while True:
             tmp_path = speech_file_queue.get()
-            if not tmp_path:    #Nothing in queue, wait till done
-                continue
+            if tmp_path is None:
+                break
             try:
                 sys_platform = platform.system()
                 if sys_platform == "Darwin" and shutil.which("afplay"):
