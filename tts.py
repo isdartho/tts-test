@@ -25,9 +25,10 @@ import subprocess
 import sys
 import tempfile
 import wave
+import threading
 from dataclasses import dataclass
 from typing import AsyncGenerator, Generator, List, Optional, Tuple
-
+from queue import Queue
 
 @dataclass
 class Voice:
@@ -195,27 +196,53 @@ class KokoroBackend(BaseTTSBackend):
             wf.writeframes(pcm_bytes)
         return buf.getvalue(), sample_rate
 
-    def speak(self, text: str, config: TTSConfig) -> None:
-        wav_bytes, _ = self.synthesize_wav_bytes(text, config)
-        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
-            tmp.write(wav_bytes)
-            tmp_path = tmp.name
+    def _break_sentences(self, text: str) -> List[str]:
+        sentences = re.split(r'(?<=[.!?])\s+', text.replace("\n", " "))
+        return [sentence.strip() for sentence in sentences if sentence.strip()]
 
+    def _process_text(self, text: str, queue: Queue, config: TTSConfig) -> None:
         try:
-            sys_platform = platform.system()
-            if sys_platform == "Darwin" and shutil.which("afplay"):
-                subprocess.run(["afplay", tmp_path], check=True)
-            elif sys_platform == "Linux" and (shutil.which("aplay") or shutil.which("paplay")):
-                player = shutil.which("paplay") or shutil.which("aplay")
-                subprocess.run([player, tmp_path], check=True)
-            elif sys_platform == "Windows" and shutil.which("powershell"):
-                ps_script = f"$player = New-Object System.Media.SoundPlayer('{tmp_path}'); $player.PlaySync();"
-                subprocess.run(["powershell", "-NoProfile", "-Command", ps_script], check=True)
-            else:
-                raise RuntimeError("No system audio player found for playback.")
+            sentences = self._break_sentences(text)
+            for sentence in sentences:
+                wav_bytes, _ = self.synthesize_wav_bytes(sentence, config)
+                with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+                    tmp.write(wav_bytes)
+                    tmp_path = tmp.name
+                    queue.put(tmp_path)
         finally:
-            if os.path.exists(tmp_path):
-                os.remove(tmp_path)
+            queue.put(None)
+
+    def speak(self, text: str, config: TTSConfig) -> None:
+        if not text or not text.strip():
+            return
+
+        speech_file_queue = Queue()
+        text_processing = threading.Thread(
+            target=self._process_text, 
+            args=(text, speech_file_queue, config), 
+            daemon=True
+        )
+        text_processing.start()
+
+        while True:
+            tmp_path = speech_file_queue.get()
+            if tmp_path is None:
+                break
+            try:
+                sys_platform = platform.system()
+                if sys_platform == "Darwin" and shutil.which("afplay"):
+                    subprocess.run(["afplay", tmp_path], check=True)
+                elif sys_platform == "Linux" and (shutil.which("aplay") or shutil.which("paplay")):
+                    player = shutil.which("paplay") or shutil.which("aplay")
+                    subprocess.run([player, tmp_path], check=True)
+                elif sys_platform == "Windows" and shutil.which("powershell"):
+                    ps_script = f"$player = New-Object System.Media.SoundPlayer('{tmp_path}'); $player.PlaySync();"
+                    subprocess.run(["powershell", "-NoProfile", "-Command", ps_script], check=True)
+                else:
+                    raise RuntimeError("No system audio player found for playback.")
+            finally:
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
 
     def save(self, text: str, file_path: str, config: TTSConfig, audio_format: str = "wav") -> str:
         wav_bytes, _ = self.synthesize_wav_bytes(text, config)
