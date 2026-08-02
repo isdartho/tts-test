@@ -1,15 +1,14 @@
 """
-TTS (Text-to-Speech) - A lightweight, pure offline Python Text-to-Speech library.
-Supports Kokoro-82M neural model (via kokoro-onnx), macOS (say), Windows (SAPI5),
-Linux (espeak/espeak-ng), and pyttsx3 fallback.
+TTS (Text-to-Speech) - A lightweight, pure offline Python Text-to-Speech library powered by Kokoro-82M.
 
 Features:
-- Neural Kokoro-82M state-of-the-art TTS model integration.
+- Dedicated Kokoro-82M state-of-the-art neural TTS engine (54 voices).
 - Pure offline speech synthesis (no internet connection required).
 - Direct speech playback & audio file export (.wav, .aiff, .mp3).
 - Synchronous & Asynchronous (asyncio) API.
 - Audio chunk streaming (sync & async generators).
 - Custom voice selection, rate (speed), volume, and pitch controls.
+- Auto-downloader for model weights (kokoro-v1.0.onnx & voices-v1.0.bin).
 - Standalone single-file Python module.
 """
 
@@ -27,8 +26,9 @@ import tempfile
 import wave
 import threading
 from dataclasses import dataclass
-from typing import AsyncGenerator, Generator, List, Optional, Tuple
 from queue import Queue
+from typing import AsyncGenerator, Generator, List, Optional, Tuple
+
 
 @dataclass
 class Voice:
@@ -46,29 +46,13 @@ class Voice:
 @dataclass
 class TTSConfig:
     """Configuration settings for Text-to-Speech synthesis."""
-    voice: Optional[str] = None
+    voice: Optional[str] = "af_heart"
     rate: int = 175  # Words per minute (default ~175 WPM)
     volume: float = 1.0  # 0.0 to 1.0
     pitch: float = 1.0  # 0.5 to 2.0 (1.0 = normal)
 
 
-class BaseTTSBackend:
-    """Abstract base class for TTS backends."""
-
-    def list_voices(self) -> List[Voice]:
-        raise NotImplementedError
-
-    def speak(self, text: str, config: TTSConfig) -> None:
-        raise NotImplementedError
-
-    def save(self, text: str, file_path: str, config: TTSConfig, audio_format: str = "wav") -> str:
-        raise NotImplementedError
-
-    def stream(self, text: str, config: TTSConfig, chunk_size: int = 4096) -> Generator[bytes, None, None]:
-        raise NotImplementedError
-
-
-class KokoroBackend(BaseTTSBackend):
+class KokoroBackend:
     """
     Kokoro-82M ONNX neural TTS engine backend.
     Provides ultra-realistic, state-of-the-art speech synthesis using the 82M open model.
@@ -273,336 +257,13 @@ class KokoroBackend(BaseTTSBackend):
             yield wav_bytes[i:i + chunk_size]
 
 
-class MacOSBackend(BaseTTSBackend):
-    """macOS native 'say' engine backend."""
-
-    def __init__(self):
-        self.say_path = shutil.which("say") or "/usr/bin/say"
-
-    def list_voices(self) -> List[Voice]:
-        voices = []
-        try:
-            res = subprocess.run([self.say_path, "-v", "?"], capture_output=True, text=True, check=True)
-            for line in res.stdout.strip().splitlines():
-                if not line.strip():
-                    continue
-                parts = re.split(r"\s+#\s+", line, maxsplit=1)
-                left = parts[0].strip()
-                match = re.search(r"^(.+?)\s+([a-zA-Z]{2}_[a-zA-Z]{2,4})$", left)
-                if match:
-                    v_name = match.group(1).strip()
-                    v_lang = match.group(2).strip()
-                    voices.append(Voice(id=v_name, name=v_name, language=v_lang))
-                else:
-                    v_name = left.split()[0] if left else "Unknown"
-                    voices.append(Voice(id=v_name, name=v_name))
-        except Exception:
-            pass
-        return voices
-
-    def _build_command_args(self, text: str, config: TTSConfig) -> Tuple[List[str], str]:
-        cmd = [self.say_path]
-        if config.voice:
-            cmd.extend(["-v", config.voice])
-        
-        if config.rate:
-            cmd.extend(["-r", str(config.rate)])
-
-        vol_pct = max(0.0, min(1.0, config.volume))
-        pitch_mult = max(0.5, min(2.0, config.pitch))
-        
-        prefix = ""
-        if vol_pct != 1.0:
-            prefix += f"[[volm {vol_pct:.2f}]] "
-        if pitch_mult != 1.0:
-            semitones = int((pitch_mult - 1.0) * 12)
-            if semitones != 0:
-                sign = "+" if semitones > 0 else ""
-                prefix += f"[[pitch {sign}{semitones}]] "
-                
-        formatted_text = prefix + text
-        return cmd, formatted_text
-
-    def speak(self, text: str, config: TTSConfig) -> None:
-        cmd, formatted_text = self._build_command_args(text, config)
-        cmd.append(formatted_text)
-        subprocess.run(cmd, check=True)
-
-    def save(self, text: str, file_path: str, config: TTSConfig, audio_format: str = "wav") -> str:
-        cmd, formatted_text = self._build_command_args(text, config)
-        
-        ext = os.path.splitext(file_path)[1].lower().strip(".")
-        target_fmt = audio_format.lower() if audio_format else (ext if ext else "wav")
-
-        if target_fmt == "wav":
-            cmd.extend(["-o", file_path, "--data-format=LEI16@22050"])
-            cmd.append(formatted_text)
-            subprocess.run(cmd, check=True)
-        elif target_fmt == "aiff":
-            cmd.extend(["-o", file_path])
-            cmd.append(formatted_text)
-            subprocess.run(cmd, check=True)
-        else:
-            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
-                tmp_path = tmp.name
-            try:
-                cmd.extend(["-o", tmp_path, "--data-format=LEI16@22050"])
-                cmd.append(formatted_text)
-                subprocess.run(cmd, check=True)
-
-                ffmpeg_path = shutil.which("ffmpeg")
-                if ffmpeg_path:
-                    subprocess.run([ffmpeg_path, "-y", "-i", tmp_path, file_path], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                else:
-                    shutil.move(tmp_path, file_path)
-            finally:
-                if os.path.exists(tmp_path):
-                    os.remove(tmp_path)
-
-        return file_path
-
-    def stream(self, text: str, config: TTSConfig, chunk_size: int = 4096) -> Generator[bytes, None, None]:
-        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
-            tmp_path = tmp.name
-        try:
-            self.save(text, tmp_path, config, audio_format="wav")
-            with open(tmp_path, "rb") as f:
-                while True:
-                    chunk = f.read(chunk_size)
-                    if not chunk:
-                        break
-                    yield chunk
-        finally:
-            if os.path.exists(tmp_path):
-                os.remove(tmp_path)
-
-
-class WindowsBackend(BaseTTSBackend):
-    """Windows PowerShell / System.Speech SAPI backend."""
-
-    def __init__(self):
-        self.powershell_path = shutil.which("powershell") or "powershell.exe"
-
-    def _exec_ps(self, ps_script: str) -> str:
-        res = subprocess.run(
-            [self.powershell_path, "-NoProfile", "-NonInteractive", "-Command", ps_script],
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-        return res.stdout.strip()
-
-    def list_voices(self) -> List[Voice]:
-        script = """
-        Add-Type -AssemblyName System.Speech;
-        $synth = New-Object System.Speech.Synthesis.SpeechSynthesizer;
-        $synth.GetInstalledVoices() | ForEach-Object {
-            $info = $_.VoiceInfo;
-            "$($info.Name)|$($info.Culture.Name)|$($info.Gender)"
-        }
-        """
-        voices = []
-        try:
-            out = self._exec_ps(script)
-            for line in out.splitlines():
-                if "|" in line:
-                    v_name, v_lang, v_gender = line.split("|", 2)
-                    voices.append(Voice(id=v_name.strip(), name=v_name.strip(), language=v_lang.strip(), gender=v_gender.strip()))
-        except Exception:
-            pass
-        return voices
-
-    def _build_ps_synth_code(self, text: str, config: TTSConfig, output_wav: Optional[str] = None) -> str:
-        sapi_rate = max(-10, min(10, int((config.rate - 175) / 15)))
-        sapi_vol = max(0, min(100, int(config.volume * 100)))
-
-        text_escaped = text.replace("'", "''")
-        voice_code = f"$synth.SelectVoice('{config.voice}');" if config.voice else ""
-        output_code = f"$synth.SetOutputToWaveFile('{output_wav}');" if output_wav else ""
-
-        ps_script = f"""
-        Add-Type -AssemblyName System.Speech;
-        $synth = New-Object System.Speech.Synthesis.SpeechSynthesizer;
-        {voice_code}
-        $synth.Rate = {sapi_rate};
-        $synth.Volume = {sapi_vol};
-        {output_code}
-        $synth.Speak('{text_escaped}');
-        $synth.Dispose();
-        """
-        return ps_script
-
-    def speak(self, text: str, config: TTSConfig) -> None:
-        ps_script = self._build_ps_synth_code(text, config)
-        self._exec_ps(ps_script)
-
-    def save(self, text: str, file_path: str, config: TTSConfig, audio_format: str = "wav") -> str:
-        ps_script = self._build_ps_synth_code(text, config, output_wav=file_path)
-        self._exec_ps(ps_script)
-        return file_path
-
-    def stream(self, text: str, config: TTSConfig, chunk_size: int = 4096) -> Generator[bytes, None, None]:
-        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
-            tmp_path = tmp.name
-        try:
-            self.save(text, tmp_path, config)
-            with open(tmp_path, "rb") as f:
-                while True:
-                    chunk = f.read(chunk_size)
-                    if not chunk:
-                        break
-                    yield chunk
-        finally:
-            if os.path.exists(tmp_path):
-                os.remove(tmp_path)
-
-
-class LinuxEspeakBackend(BaseTTSBackend):
-    """Linux espeak / espeak-ng backend."""
-
-    def __init__(self):
-        self.espeak_path = shutil.which("espeak-ng") or shutil.which("espeak") or "espeak"
-
-    def list_voices(self) -> List[Voice]:
-        voices = []
-        try:
-            res = subprocess.run([self.espeak_path, "--voices"], capture_output=True, text=True, check=True)
-            lines = res.stdout.strip().splitlines()
-            for line in lines[1:]:
-                parts = line.split()
-                if len(parts) >= 4:
-                    lang = parts[1]
-                    name = parts[3]
-                    voices.append(Voice(id=name, name=name, language=lang))
-        except Exception:
-            pass
-        return voices
-
-    def speak(self, text: str, config: TTSConfig) -> None:
-        cmd = [self.espeak_path, "-s", str(config.rate), "-a", str(int(config.volume * 100)), "-p", str(int(config.pitch * 50))]
-        if config.voice:
-            cmd.extend(["-v", config.voice])
-        cmd.append(text)
-        subprocess.run(cmd, check=True)
-
-    def save(self, text: str, file_path: str, config: TTSConfig, audio_format: str = "wav") -> str:
-        cmd = [self.espeak_path, "-s", str(config.rate), "-a", str(int(config.volume * 100)), "-p", str(int(config.pitch * 50))]
-        if config.voice:
-            cmd.extend(["-v", config.voice])
-        cmd.extend(["-w", file_path, text])
-        subprocess.run(cmd, check=True)
-        return file_path
-
-    def stream(self, text: str, config: TTSConfig, chunk_size: int = 4096) -> Generator[bytes, None, None]:
-        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
-            tmp_path = tmp.name
-        try:
-            self.save(text, tmp_path, config)
-            with open(tmp_path, "rb") as f:
-                while True:
-                    chunk = f.read(chunk_size)
-                    if not chunk:
-                        break
-                    yield chunk
-        finally:
-            if os.path.exists(tmp_path):
-                os.remove(tmp_path)
-
-
-class Pyttsx3Backend(BaseTTSBackend):
-    """Fallback backend using pyttsx3 package if installed."""
-
-    def __init__(self):
-        import pyttsx3
-        self.pyttsx3 = pyttsx3
-
-    def list_voices(self) -> List[Voice]:
-        engine = self.pyttsx3.init()
-        voices = []
-        for v in engine.getProperty("voices"):
-            voices.append(Voice(id=v.id, name=v.name, language=getattr(v, "languages", [None])[0]))
-        return voices
-
-    def _configure_engine(self, engine, config: TTSConfig):
-        if config.voice:
-            engine.setProperty("voice", config.voice)
-        if config.rate:
-            engine.setProperty("rate", config.rate)
-        if config.volume is not None:
-            engine.setProperty("volume", config.volume)
-
-    def speak(self, text: str, config: TTSConfig) -> None:
-        engine = self.pyttsx3.init()
-        self._configure_engine(engine, config)
-        engine.say(text)
-        engine.runAndWait()
-
-    def save(self, text: str, file_path: str, config: TTSConfig, audio_format: str = "wav") -> str:
-        engine = self.pyttsx3.init()
-        self._configure_engine(engine, config)
-        engine.save_to_file(text, file_path)
-        engine.runAndWait()
-        return file_path
-
-    def stream(self, text: str, config: TTSConfig, chunk_size: int = 4096) -> Generator[bytes, None, None]:
-        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
-            tmp_path = tmp.name
-        try:
-            self.save(text, tmp_path, config)
-            with open(tmp_path, "rb") as f:
-                while True:
-                    chunk = f.read(chunk_size)
-                    if not chunk:
-                        break
-                    yield chunk
-        finally:
-            if os.path.exists(tmp_path):
-                os.remove(tmp_path)
-
-
-def _get_best_backend(engine_hint: Optional[str] = None, voice_hint: Optional[str] = None) -> BaseTTSBackend:
-    """Automatically selects the best available backend based on hint or system environment."""
-    if engine_hint == "kokoro" or (voice_hint and any(voice_hint.startswith(p) for p in ["af_", "am_", "bf_", "bm_", "jf_", "jm_", "zf_", "zm_", "hf_", "hm_"])):
-        try:
-            import kokoro_onnx
-            return KokoroBackend()
-        except ImportError:
-            pass
-
-    try:
-        import kokoro_onnx
-        return KokoroBackend()
-    except ImportError:
-        pass
-
-    try:
-        import pyttsx3
-        return Pyttsx3Backend()
-    except ImportError:
-        pass
-
-    sys_platform = platform.system()
-    if sys_platform == "Darwin" and shutil.which("say"):
-        return MacOSBackend()
-    elif sys_platform == "Windows" and shutil.which("powershell"):
-        return WindowsBackend()
-    elif sys_platform == "Linux" and (shutil.which("espeak-ng") or shutil.which("espeak")):
-        return LinuxEspeakBackend()
-
-    if shutil.which("say"):
-        return MacOSBackend()
-
-    raise RuntimeError("No offline TTS engine found on this system.")
-
-
 class TTS:
     """
-    Main Text-to-Speech Engine Interface supporting Kokoro-82M neural TTS and native system engines.
+    Main Text-to-Speech Engine Interface powered exclusively by Kokoro-82M.
 
     Example Usage:
-        # Use Kokoro-82M neural model:
-        tts = TTS(engine="kokoro", voice="af_heart")
-        tts.speak("Hello from Kokoro-82M!")
+        tts = TTS(voice="af_heart")
+        tts.speak("Hello world!")
         tts.save("hello.wav")
 
         # Async:
@@ -615,18 +276,18 @@ class TTS:
 
     def __init__(
         self,
-        voice: Optional[str] = None,
+        voice: Optional[str] = "af_heart",
         rate: int = 175,
         volume: float = 1.0,
         pitch: float = 1.0,
-        engine: Optional[str] = None,
-        backend: Optional[BaseTTSBackend] = None,
+        model_path: Optional[str] = None,
+        voices_path: Optional[str] = None,
     ):
         self.config = TTSConfig(voice=voice, rate=rate, volume=volume, pitch=pitch)
-        self.backend = backend or _get_best_backend(engine_hint=engine, voice_hint=voice)
+        self.backend = KokoroBackend(model_path=model_path, voices_path=voices_path)
 
     def list_voices(self) -> List[Voice]:
-        """Returns a list of all available system or Kokoro TTS voices."""
+        """Returns a list of all available Kokoro neural voices."""
         return self.backend.list_voices()
 
     def set_voice(self, voice_id_or_name: str) -> TTS:
@@ -699,22 +360,21 @@ class TTS:
 if __name__ == "__main__":
     import argparse
 
-    parser = argparse.ArgumentParser(description="Standalone Offline Python Text-to-Speech CLI")
+    parser = argparse.ArgumentParser(description="Dedicated Kokoro-82M Neural Python Text-to-Speech CLI")
     parser.add_argument("text", nargs="?", help="Text to speak or synthesize")
-    parser.add_argument("-e", "--engine", choices=["kokoro", "system"], default="kokoro", help="TTS Engine to use")
     parser.add_argument("-o", "--output", help="Output file path (e.g. output.wav)")
-    parser.add_argument("-v", "--voice", help="Voice name or ID (e.g. af_heart, af_bella, am_adam)")
+    parser.add_argument("-v", "--voice", default="af_heart", help="Voice name or ID (e.g. af_heart, am_adam, bf_emma)")
     parser.add_argument("-r", "--rate", type=int, default=175, help="Speech rate in WPM")
-    parser.add_argument("-l", "--list-voices", action="store_true", help="List available system voices")
+    parser.add_argument("-l", "--list-voices", action="store_true", help="List available Kokoro voices")
 
     args = parser.parse_args()
 
-    engine = TTS(engine=args.engine, voice=args.voice, rate=args.rate)
+    engine = TTS(voice=args.voice, rate=args.rate)
 
     if args.list_voices:
-        print(f"Available Voices ({args.engine}):")
+        print("Available Kokoro Neural Voices:")
         for v in engine.list_voices():
-            print(f" - {v.name} (ID: {v.id}) [{v.language or 'unknown'}]")
+            print(f" - {v.name} (ID: {v.id}) [{v.language or 'unknown'}] ({v.gender or 'unknown'})")
     elif args.text:
         if args.output:
             out = engine.save(args.text, args.output)

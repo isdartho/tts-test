@@ -1,5 +1,5 @@
 """
-Unit and integration tests for the TTS Python library (including Kokoro-82M).
+Unit and integration tests for the dedicated Kokoro-82M TTS Python library.
 """
 
 import asyncio
@@ -9,15 +9,15 @@ import unittest
 from tts import TTS, Voice, KokoroBackend
 
 
-class TestTTSLibrary(unittest.TestCase):
+class TestKokoroTTS(unittest.TestCase):
 
     def setUp(self):
-        self.tts = TTS(engine="kokoro", voice="af_heart", rate=180, volume=0.9)
+        self.tts = TTS(voice="af_heart", rate=180, volume=0.9)
 
     def test_kokoro_backend_voices(self):
         voices = self.tts.list_voices()
         self.assertIsInstance(voices, list)
-        self.assertGreater(len(voices), 10)
+        self.assertEqual(len(voices), 54)
         voice_ids = [v.id for v in voices]
         self.assertIn("af_heart", voice_ids)
         self.assertIn("af_bella", voice_ids)
