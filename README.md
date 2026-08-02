@@ -7,6 +7,7 @@ A lightweight, pure offline, cross-platform Text-to-Speech library written in Py
 ## Key Features
 
 - **Kokoro-82M Neural Engine**: State-of-the-art open weights neural speech synthesis with 54 studio-quality voices.
+- **Zero-Latency Sentence Pipelining**: Background multithreaded synthesis pre-generates upcoming sentence audio while current sentences play out loud, eliminating pauses between sentences.
 - **Pure Offline**: Operates 100% offline without requiring API keys or cloud services.
 - **Auto-Model Downloader**: Automatically downloads model weights (`kokoro-v1.0.onnx` & `voices-v1.0.bin`) on first run.
 - **Cross-Platform**: Seamless fallback across macOS, Windows, Linux, and ONNX Runtime.
@@ -19,8 +20,10 @@ A lightweight, pure offline, cross-platform Text-to-Speech library written in Py
 
 ## Installation
 
+Install dependencies using `requirements.txt`:
+
 ```bash
-pip install kokoro-onnx soundfile numpy
+pip install -r requirements.txt
 ```
 
 *(If `kokoro-onnx` is not installed, the library automatically falls back to native system engines like macOS `say` or Windows SAPI).*
@@ -37,8 +40,8 @@ from tts import TTS
 # Initialize Kokoro-82M TTS (downloads model on first use if needed)
 tts = TTS(engine="kokoro", voice="af_heart", rate=180)
 
-# Speak text aloud with high quality neural voice
-tts.speak("Hello world! Kokoro-82M is synthesizing neural speech locally.")
+# Speak multi-sentence text with seamless pipelined playback
+tts.speak("Hello world! Kokoro-82M is synthesizing speech locally. Notice how sentence two plays with zero gap!")
 
 # Save 24kHz audio file
 tts.save("Saving neural speech to file.", "kokoro_output.wav")
@@ -115,7 +118,7 @@ Run `tts.py` directly from the command line:
 
 ```bash
 # Speak text with Kokoro-82M
-python3 tts.py "Hello from command line Kokoro" -v af_heart
+python3 tts.py "Hello from command line Kokoro. Pipelined multi-sentence execution is supported." -v af_heart
 
 # Save speech to file
 python3 tts.py "Save this neural audio" -v am_adam -o output.wav
